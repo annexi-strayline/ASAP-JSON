@@ -4,7 +4,7 @@
 --                                                                          --
 -- ------------------------------------------------------------------------ --
 --                                                                          --
---  Copyright (C) 2020-2021, ANNEXI-STRAYLINE Trans-Human Ltd.              --
+--  Copyright (C) 2020-2022, ANNEXI-STRAYLINE Trans-Human Ltd.              --
 --  All rights reserved.                                                    --
 --                                                                          --
 --  Original Contributors:                                                  --
@@ -146,7 +146,6 @@ package JSON.Unbounded_Codecs is
    -- memory fragmentation design, and the sane assumption that these
    -- sorts of mutations will not happen more than once per JSON_String
    -- value.
-
    
    procedure Nullify (Target: in out JSON_Value); 
    
@@ -158,123 +157,151 @@ package JSON.Unbounded_Codecs is
    type JSON_Value_Constant_Reference 
      (Ref: not null access constant JSON_Value) is 
      null record with Implicit_Dereference => Ref;
-
    
-   --------------------
-   -- JSON_Structure --
-   --------------------
    
-   type JSON_Structure is tagged limited private with
-     Constant_Indexing => Constant_Reference,
-     Iterator_Element  => JSON_Value,
-     Default_Iterator  => Iterate;
+   --------------------------
+   -- JSON Structure Types --
+   --------------------------
    
-   -- Represents the root of a JSON_Object or JSON_Array, and is referenced via
-   -- a corresponding JSON_Object or JSON_Array JSON_Value
+   -- JSON_Constant_Structure and JSON_Mutable_Structure represent one
+   -- branch of either a JSON "Object" or "Array", and thus may contain
+   -- further nested strucutres of either type.
+   --
+   -- Each type of JSON structure has a Length and Kind function:
+   -- Length: Number of Elements or Objects that are direct children of
+   --         the structure.
+   -- Kind  : The kind of JSON structure represented, either a
+   --         JSON_Object or JSON_Array
+   --
+   -- Valid JSON structure objects can only be obtained by invoking the
+   -- appropriate "delve" operation of a JSON Codec.
+   -- 
+   -- Both flavors present the same indexing capabilities as listed below:
    
-   function Kind (Structure: JSON_Structure) return JSON_Structure_Kind;
-   
-   function Length (Structure: JSON_Structure) return Natural;
-   
-   -- Returns the number of Elements or Members that are direct children of
-   -- Structure
    
    -- Array indexing --
    
-   subtype  JSON_Array_Index is Natural;
+   subtype JSON_Array_Index is Natural;
    
    -- Using the Javascript convention for zero-based indexing
-   
-   function Constant_Reference (Structure: JSON_Structure; 
-                                Index    : JSON_Array_Index)
-                               return JSON_Value_Constant_Reference with
-     Pre'Class  => Structure.Kind = JSON_Array and Index < Structure.Length;
-   
-   -- Index is a Javascript-style, zero-based array index. Note that,
-   -- internally, the Codec represents the entire JSON object as a tree, and
-   -- therefore Arrays are internally linked-lists. In order to provide the
-   -- expected runtime qualities, the first access of a JSON_Array object via
-   -- this index-based (Constant_)Reference operation causes the array to be
-   -- "vectorized". Vectorization is done "lazily" since it encurs a
-   -- potentially high memory cost.
    --
-   -- If the Index is out of range (> Length), Contraint_Error is raised.
+   -- Eg: Structure(1) 
+   --
+   -- An integer index is a Javascript-style, zero-based array index. Note
+   -- that, internally, each object contains its own hashmap. For arrays
+   -- this map is indexed by hashes of each index. Array look-up is fairly
+   -- consistent for any index, but is slower than actual vector indexing,
+   -- since such JSON_Arrays are not actually represented as vectors.
+   --
+   -- However, the JSON blob is represented as a tree structure, and therefore
+   -- array iteration should be done via user-defined iteration, which will
+   -- ensure that iteration is acheived through links rather than the hash map.
+   --
+   -- If Index is out of range (> Structure.Length), or if the structure is not
+   -- an Array, Constraint_Error will result from an explicit check or 
+   -- failed discriminent check.
+   --
+   -- While it might be helpful to arrange the constant and mutable json
+   -- structure types in a class heirachy, unfortunately the particulars of
+   -- user-defined indexing and iteration makes that approach
+
    
    -- Object indexing --
    
-   function Has_Member (Structure: JSON_Structure; Name: JSON_String_Value)
-                       return Boolean with
-     Pre'Class => Structure.Kind = JSON_Object;
-   
-   -- Returns True iff Structure contains a member named Name.
-   -- A Discrimint_Check fails if Structure is not a JSON_Object.
-   
-   function Constant_Reference (Structure: JSON_Structure;
-                                Name     : JSON_String_Value)
-                               return JSON_Value_Constant_Reference with
-     Pre'Class => Structure.Has_Member (Name);
-   
+   -- Object indexing is for locating members of an object by their direct name
+   -- given as a JSON_String_Value. In order to prevent unnecessary exceptions
+   -- when attempting to index an object that does not exist in the structure,
+   -- the Has_Member function is provided to pre-check if a member exists in
+   -- the object.
+   --
    -- Name must be a direct name for a member in the the first level
    -- of Structure (which must also be an object). Paths cannot be used on
    -- JSON_Structure objects. For path indexing, use the Unbounded_JSON_Codec
    -- Lookup indexing operations
    --
-   -- If Has_Member (Name) = False, Constraint_Error is raised.
+   -- Has_Member returns False if Structure does not contain an element with
+   -- the given name. It will also return False if Structure is not a
+   -- JSON_Object
    
    
-   -- Structure Iteration --
+   -- Cursor indexing --
+   
+   -- A universal JSON_Structure_Cursor can be used to index into any structure
+   -- type, however full checking of matching Codec and structure is employed.
+   --
+   -- The Cursor must designate an element or member of the Structure, else
+   -- Constraint_Error will be raised.
    
    type JSON_Structure_Cursor is limited private;
    
    function Has_Value (Position: JSON_Structure_Cursor) return Boolean;
    
-   function Constant_Reference (Structure: JSON_Structure;
-                                Position : JSON_Structure_Cursor)
-                               return JSON_Value_Constant_Reference with
-     Pre'Class => Has_Value (Position);
-   
-   -- Constraint_Error is raised if Position is not a valid cursor, either
-   -- because it is null, or because it belongs to a different codec.
+   -- Returns True if Position is a valid (non-null) Cursor. Mostly used
+   -- by JSON_Structure_Iterators
    
    package JSON_Structure_Iterators is new Ada.Iterator_Interfaces
      (Cursor      => JSON_Structure_Cursor,
       Has_Element => Has_Value);
    
-   function Iterate (Structure: JSON_Structure) return
-     JSON_Structure_Iterators.Reversible_Iterator'Class;
    
-   ----------------------------
+   -- JSON_Constant_Structure --
+   -----------------------------
+   
+   type JSON_Constant_Structure is tagged limited private with
+     Constant_Indexing => JCS_Constant_Reference,
+     Iterator_Element  => JSON_Value,
+     Default_Iterator  => JCS_Iterate;
+   
+   function Kind (Structure: JSON_Constant_Structure)
+                 return JSON_Structure_Kind;
+   
+   function Length (Structure: JSON_Constant_Structure) return Natural;
+     
+   function Has_Member (Structure: JSON_Constant_Structure;
+                        Name     : JSON_String_Value)
+                       return Boolean;
+   
+   function JCS_Constant_Reference
+     (Structure: JSON_Constant_Structure; Index: JSON_Array_Index)
+     return JSON_Value_Constant_Reference
+   with Pre => Structure.Kind = JSON_Array and Index < Structure.Length;
+   
+   function JCS_Constant_Reference
+     (Structure: JSON_Constant_Structure; Name: JSON_String_Value)
+     return JSON_Value_Constant_Reference
+   with Pre => Structure.Kind = JSON_Object and Structure.Has_Member (Name);
+   
+   function JCS_Constant_Reference (Structure: JSON_Constant_Structure;
+                                    Position : JSON_Structure_Cursor)
+                                   return JSON_Value_Constant_Reference 
+   with Pre => Has_Value (Position);
+   
+   function JCS_Iterate
+     (Structure: JSON_Constant_Structure)
+     return JSON_Structure_Iterators.Reversible_Iterator'Class;
+   
+
    -- JSON_Mutable_Structure --
    ----------------------------
    
-   type JSON_Mutable_Structure is new JSON_Structure with private with
-     Variable_Indexing => Reference;
+   type JSON_Mutable_Structure is tagged limited private with
+     Constant_Indexing => JMS_Constant_Reference,
+     Variable_Indexing => JMS_Reference,
+     Iterator_Element  => JSON_Value,
+     Default_Iterator  => JMS_Iterate;
    
-   -- JSON_Mutable_Structures are obtained via the Unbounded_JSON_Codec Delve
-   -- operation, and can be used to obtain variable references for all values
-   -- within the underlying structure value. 
+   function Kind (Structure: JSON_Mutable_Structure)
+                 return JSON_Structure_Kind;
    
-   not overriding
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Index    : in     JSON_Array_Index)
-                      return JSON_Value_Reference with
-     Pre'Class  => Structure.Kind = JSON_Array and Index < Structure.Length;
+   function Length (Structure: JSON_Mutable_Structure) return Natural;
    
-   not overriding
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Name     : in     JSON_String_Value)
-                      return JSON_Value_Reference with
-     Pre'Class => Structure.Has_Member (Name);
-   
-   not overriding
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Position : in     JSON_Structure_Cursor)
-                      return JSON_Value_Reference with
-     Pre'Class => Has_Value (Position);
+   function Has_Member (Structure: JSON_Mutable_Structure;
+                        Name     : JSON_String_Value)
+                       return Boolean
+   with Pre'Class => Name'Length > 0;
    
    -- Structure Building --
    
-   not overriding
    function Append_Null_Member (Structure: in out JSON_Mutable_Structure;
                                 Name     : in     JSON_String_Value)
                                return JSON_Value_Reference
@@ -310,6 +337,44 @@ package JSON.Unbounded_Codecs is
    -- Appends a new structure of Kind to Strucure, and returns a reference.
    -- The returned reference can be used to obtain a JSON_(Mutable_)Structure
    -- from the Codec.
+   
+   
+   -- Indexing and Iteration --
+   
+   function JMS_Constant_Reference
+     (Structure: JSON_Mutable_Structure; Index: JSON_Array_Index)
+     return JSON_Value_Constant_Reference
+   with Pre => Structure.Kind = JSON_Array and Index < Structure.Length;
+   
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Index    : in     JSON_Array_Index)
+                          return JSON_Value_Reference
+   with Pre => Structure.Kind = JSON_Array and Index < Structure.Length;
+   
+   function JMS_Constant_Reference
+     (Structure: JSON_Mutable_Structure; Name: JSON_String_Value)
+     return JSON_Value_Constant_Reference
+   with Pre => Structure.Has_Member (Name);
+   
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Name     : in     JSON_String_Value)
+                          return JSON_Value_Reference
+   with Pre => Structure.Has_Member (Name);
+   
+   function JMS_Constant_Reference (Structure: JSON_Mutable_Structure;
+                                    Position : JSON_Structure_Cursor)
+                                   return JSON_Value_Constant_Reference 
+   with Pre => Has_Value (Position);
+
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Position : in     JSON_Structure_Cursor)
+                          return JSON_Value_Reference
+   with Pre => Has_Value (Position);
+   
+   
+   function JMS_Iterate
+     (Structure: JSON_Mutable_Structure)
+     return JSON_Structure_Iterators.Reversible_Iterator'Class;
    
    --------------------------
    -- Unbounded_JSON_Codec --
@@ -369,7 +434,7 @@ package JSON.Unbounded_Codecs is
                  return JSON_Mutable_Structure'Class;
    
    function Constant_Root (Codec: aliased Unbounded_JSON_Codec)
-                          return JSON_Structure'Class;
+                          return JSON_Constant_Structure'Class;
 
    -- Returns the root structure the represents the entire deserialized
    -- JSON object
@@ -383,7 +448,7 @@ package JSON.Unbounded_Codecs is
    
    function Constant_Delve (Codec    : aliased Unbounded_JSON_Codec;
                             Structure: aliased JSON_Value'Class)
-                           return JSON_Structure'Class with
+                           return JSON_Constant_Structure'Class with
      Pre'Class => Structure.Kind in JSON_Structure_Kind;
    
    -- Delve effectivly converts a Structure JSON_Value_Reference into a
@@ -539,9 +604,6 @@ package JSON.Unbounded_Codecs is
    -- receive timeout, thus allowing for a connection to remain active for
    -- an extreme amount of time. These permuations thus protect against this
    -- buy defining a hard deadline by which the decode operation must complete
-
-
-
    
    procedure Disallowed_Read
      (Stream: not null access Ada.Streams.Root_Stream_Type'Class;
@@ -634,8 +696,6 @@ package JSON.Unbounded_Codecs is
    -- and will render FSM_Push useless, since the FSM state will Halted
    -- immediately after deserialization in all cases, and new input will be
    -- ignored.
-   
-   
    
 private
    
@@ -756,11 +816,11 @@ private
       
    end Slab_Strings;
    
-   --------------------
-   -- JSON_Structure --
-   --------------------
+   ---------------------
+   -- JSON Structures --
+   ---------------------
    
-   type Node is access all JSON_Value with Storage_Pool => Slab_Pool;
+   type Node is access JSON_Value with Storage_Pool => Slab_Pool;
    -- We make Node a general access type so that we can assign values of
    -- JSON_Value_Reference access discriminents to Node. This will always
    -- be safe since the user is not able to create references to JSON_Values
@@ -778,15 +838,13 @@ private
    -- We know that all JSON_Values coming this way ultimately arrived via
    -- allocators, since the user as no way of directly supplying
    
-
-   
    type Constant_Codec_Access is not null access constant Unbounded_JSON_Codec 
    with Storage_Size => 0;
    
    type Mutable_Codec_Access is not null access all Unbounded_JSON_Codec 
    with Storage_Size => 0;
    
-   type JSON_Structure is tagged limited
+   type JSON_Constant_Structure is tagged limited
       record
          Structure_Root: not null Node;
          -- Always made to point to a JSON_Value with Kind of JSON_Object or
@@ -796,9 +854,11 @@ private
          Codec_Constant: Constant_Codec_Access;
       end record;
    
-   type JSON_Mutable_Structure is new JSON_Structure with 
+   type JSON_Mutable_Structure is tagged limited
       record
-         Codec_Mutable: Mutable_Codec_Access;
+         Structure_Root: not null Node;
+         Codec_Constant: Constant_Codec_Access;
+         Codec_Mutable : Mutable_Codec_Access;
       end record;
    
    --------------------
@@ -856,7 +916,7 @@ private
       
       type Match_Level is range 1 .. 4;
       
-      Performance_Monitoring: constant Boolean := True;
+      Performance_Monitoring: constant Boolean := False;
       
       type Level_Registrations is array (Match_Level) of Natural;
       -- Number of registrations per match level

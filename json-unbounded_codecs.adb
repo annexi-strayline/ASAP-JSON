@@ -4,7 +4,7 @@
 --                                                                          --
 -- ------------------------------------------------------------------------ --
 --                                                                          --
---  Copyright (C) 2021, ANNEXI-STRAYLINE Trans-Human Ltd.                   --
+--  Copyright (C) 2021-2022, ANNEXI-STRAYLINE Trans-Human Ltd.              --
 --  All rights reserved.                                                    --
 --                                                                          --
 --  Original Contributors:                                                  --
@@ -77,12 +77,9 @@ package body JSON.Unbounded_Codecs is
    -- reponsible for mutating the Container, and properly initializing it.
    
    function Append_Node (Parent: not null Node) return not null Node
-   is 
-      New_Node: Node; -- := new (Parent.Codec_Subpool) JSON_Value;
+   is
+      New_Node: Node := new (Parent.Codec_Subpool) JSON_Value;
    begin
-      New_Node := new (Parent.Codec_Subpool) JSON_Value;
-      -- TODO: Move this to the allocator.. Emacs ada mode doesn't like subpool
-      -- allocations..
       New_Node.Root := (if Parent.Parent = null then Parent else Parent.Root);
       New_Node.Parent := Parent;
       New_Node.Codec_Subpool := Parent.Codec_Subpool;
@@ -361,21 +358,24 @@ package body JSON.Unbounded_Codecs is
    end;
    
    --
-   -- JSON_Structure / JSON_Mutable_Structure
+   -- JSON_Constant_Structure / JSON_Mutable_Structure
    --
    
    ----------
    -- Kind --
    ----------
    
-   function Kind (Structure: JSON_Structure) return JSON_Structure_Kind is
-     (Structure.Structure_Root.Container.Kind);
+   function Kind (Structure: JSON_Constant_Structure) return
+     JSON_Structure_Kind is (Structure.Structure_Root.Container.Kind);
+   
+   function Kind (Structure: JSON_Mutable_Structure) return
+     JSON_Structure_Kind is (Structure.Structure_Root.Container.Kind);
    
    ------------
    -- Length --
    ------------
    
-   function Length (Structure: JSON_Structure) return Natural is
+   function Length (Structure: JSON_Constant_Structure) return Natural is
       Struct_Actual: JSON_Value renames Structure.Structure_Root.all;
    begin
       case JSON_Structure_Kind (Struct_Actual.Container.Kind) is
@@ -384,60 +384,20 @@ package body JSON.Unbounded_Codecs is
       end case;
    end;
    
-   --------------------
-   -- Array Indexing --
-   --------------------
-   
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Index    : in     JSON_Array_Index)
-                      return JSON_Value_Reference
-   is
-      use Node_Hash_Maps;
-      Struct_Actual: JSON_Value renames Structure.Structure_Root.all;
-   begin
-      if Structure.Codec_Constant.Write_Only then
-         raise Constraint_Error with "Cannot index. Codec is write-only.";
-      elsif Index >= Struct_Actual.Container.Element_Count then
-         raise Constraint_Error with "Index is out of range of JSON_Array";
-      end if;
-      
-      return JSON_Value_Reference'
-        (Ref => Lookup_By_Index 
-           (Index_Map => Struct_Actual.Container.Index_Map,
-            Index     => Index));
-      
-      -- Note that any Index that is within the Element count shuld not
-      -- possibly result in a missed lookup. If it does happen, a null
-      -- check will fail when we try to return the reference
-      
-   end;
-   
    ----------------------------------------------------------------------
    
-   function Constant_Reference (Structure: JSON_Structure; 
-                                Index    : JSON_Array_Index)
-                               return JSON_Value_Constant_Reference
-   is
-      use Node_Hash_Maps;
-      Struct_Actual: JSON_Value renames Structure.Structure_Root.all;
-   begin
-      if Structure.Codec_Constant.Write_Only then
-         raise Constraint_Error with "Cannot index. Codec is write-only.";
-      elsif Index >= Struct_Actual.Container.Element_Count then
-         raise Constraint_Error with "Index is out of range of JSON_Array";
-      end if;
-      
-      return JSON_Value_Constant_Reference'
-        (Ref => Lookup_By_Index
-           (Index_Map => Struct_Actual.Container.Index_Map,
-            Index     => Index));
-   end;
+   function Length (Structure: JSON_Mutable_Structure) return Natural is
+     (JSON_Constant_Structure'(Structure_Root => Structure.Structure_Root,
+                               Codec_Constant => Structure.Codec_Constant)
+          .Length);
    
-   ----------------------------
-   -- Object (Name) Indexing --
-   ----------------------------
    
-   function Has_Member (Structure: JSON_Structure; Name: JSON_String_Value)
+   ----------------
+   -- Has_Member --
+   ----------------
+   
+   function Has_Member (Structure: JSON_Constant_Structure;
+                        Name     : JSON_String_Value)
                        return Boolean
    is
       use Node_Hash_Maps;
@@ -445,6 +405,8 @@ package body JSON.Unbounded_Codecs is
    begin
       if Structure.Codec_Constant.Write_Only then
          raise Constraint_Error with "Cannot index. Codec is write-only.";
+      elsif Struct_Actual.Container.Kind /= JSON_Object then
+         return False;
       else
          return Lookup_By_Name (Name_Map => Struct_Actual.Container.Name_Map,
                                 Name     => Name) 
@@ -454,88 +416,193 @@ package body JSON.Unbounded_Codecs is
    
    ----------------------------------------------------------------------
    
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Name     : in     JSON_String_Value)
-                      return JSON_Value_Reference
+   function Has_Member (Structure: JSON_Mutable_Structure;
+                        Name     : JSON_String_Value)
+                       return Boolean
+   is (JSON_Constant_Structure'(Structure_Root => Structure.Structure_Root,
+                                Codec_Constant => Structure.Codec_Constant)
+           .Has_Member(Name));
+   
+   --------------------
+   -- Array Indexing --
+   --------------------
+   
+   function JCS_Reference_Node (Structure: JSON_Constant_Structure;
+                                Index    : JSON_Array_Index)
+                               return not null Node
    is
-      use Node_Hash_Maps;
       Struct_Actual: JSON_Value renames Structure.Structure_Root.all;
-      Hit: Node;
    begin
       if Structure.Codec_Constant.Write_Only then
          raise Constraint_Error with "Cannot index. Codec is write-only.";
+         
+      elsif Struct_Actual.Container.Kind /= JSON_Array then
+         -- This allows a smart compiler to eliminate remaining discrimint
+         -- checks
+         raise Constraint_Error with
+           "Integer indexing only applies to JSON_Array types";
+         
+      elsif Index >= Struct_Actual.Container.Element_Count then
+         raise Constraint_Error with "Index is out of range of JSON_Array";
+         
       end if;
       
-      Hit := Lookup_By_Name (Name_Map => Struct_Actual.Container.Name_Map,
-                             Name     => Name);
+      return Node_Hash_Maps.Lookup_By_Index 
+        (Index_Map => Struct_Actual.Container.Index_Map,
+         Index     => Index);
       
-      if Hit = null then
-         raise Constraint_Error with "Object does not contain named member.";
-      else
-         return JSON_Value_Reference'(Ref => Hit);
-      end if;
-   end;
+      -- Null check is enforced here if, somehow, Index is not valid
+   end JCS_Reference_Node;
    
    ----------------------------------------------------------------------
    
-   function Constant_Reference (Structure: JSON_Structure;
-                                Name     : JSON_String_Value)
-                               return JSON_Value_Constant_Reference
+   function JCS_Constant_Reference
+     (Structure: JSON_Constant_Structure; Index: JSON_Array_Index)
+     return JSON_Value_Constant_Reference
+   is ((Ref => JCS_Reference_Node (Structure, Index)));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Constant_Reference
+     (Structure: JSON_Mutable_Structure; Index: JSON_Array_Index)
+     return JSON_Value_Constant_Reference
+   is (JSON_Constant_Structure'(Structure_Root => Structure.Structure_Root,
+                                Codec_Constant => Structure.Codec_Constant)
+           .JCS_Constant_Reference (Index));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Index    : in     JSON_Array_Index)
+                          return JSON_Value_Reference
    is
-      use Node_Hash_Maps;
+      Constant_Structure: JSON_Constant_Structure := 
+        (Structure_Root => Structure.Structure_Root,
+         Codec_Constant => Structure.Codec_Constant);
+      
+      Target: Node := JCS_Reference_Node (Structure => Constant_Structure,
+                                          Index     => Index);
+   begin
+      return (Ref => Target);
+   end;
+   
+   ----------------------------
+   -- Object (Name) Indexing --
+   ----------------------------
+   
+   function JCS_Reference_Node (Structure: JSON_Constant_Structure;
+                                Name     : JSON_String_Value)
+                               return not null Node
+   is
       Struct_Actual: JSON_Value renames Structure.Structure_Root.all;
       Hit: Node;
    begin
       if Structure.Codec_Constant.Write_Only then
          raise Constraint_Error with "Cannot index. Codec is write-only.";
+      elsif Struct_Actual.Container.Kind /= JSON_Object then
+         raise Constraint_Error with
+           "Name indexing only applies to JSON_Object types";
       end if;
       
-      Hit := Lookup_By_Name (Name_Map => Struct_Actual.Container.Name_Map,
-                             Name     => Name);
+      Hit := Node_Hash_Maps.Lookup_By_Name
+        (Name_Map => Struct_Actual.Container.Name_Map,
+         Name     => Name);
       
       if Hit = null then
          raise Constraint_Error with "Object does not contain named member.";
       else
-         return JSON_Value_Constant_Reference'(Ref => Hit);
+         return Hit;
       end if;
+   end JCS_Reference_Node;
+   
+   ----------------------------------------------------------------------
+   
+   function JCS_Constant_Reference
+     (Structure: JSON_Constant_Structure; Name: JSON_String_Value)
+     return JSON_Value_Constant_Reference
+   is ((Ref => JCS_Reference_Node (Structure, Name)));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Constant_Reference
+     (Structure: JSON_Mutable_Structure; Name: JSON_String_Value)
+     return JSON_Value_Constant_Reference
+   is (JSON_Constant_Structure'(Structure_Root => Structure.Structure_Root,
+                                Codec_Constant => Structure.Codec_Constant)
+           .JCS_Constant_Reference (Name));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Name     : in     JSON_String_Value)
+                          return JSON_Value_Reference
+   is
+      Constant_Structure: JSON_Constant_Structure := 
+        (Structure_Root => Structure.Structure_Root,
+         Codec_Constant => Structure.Codec_Constant);
+      
+      Target: Node := JCS_Reference_Node (Structure => Constant_Structure,
+                                          Name      => Name);
+   begin
+      return (Ref => Target);
    end;
+   
+   ---------------
+   -- Has_Value --
+   ---------------
+   
+   function Has_Value (Position: JSON_Structure_Cursor) return Boolean is
+     (Position.Target /= null);   
    
    ---------------------
    -- Cursor Indexing --
    ---------------------
    
-   function Has_Value (Position: JSON_Structure_Cursor) return Boolean is
-     (Position.Target /= null);
-   
-   ----------------------------------------------------------------------
-   
-   function Reference (Structure: in out JSON_Mutable_Structure;
-                       Position : in     JSON_Structure_Cursor)
-                      return JSON_Value_Reference
-   is begin
-      if Position.Target = null then
-         raise Constraint_Error with "Cursor does not designate a value.";
-      elsif Position.Target.Parent /= Structure.Structure_Root then
-         raise Constraint_Error with "Cursor is not from this structure.";
-      else
-         return JSON_Value_Reference'(Ref => Position.Target);
-      end if;
-   end;
-   
-   ----------------------------------------------------------------------
-   
-   function Constant_Reference (Structure: JSON_Structure;
+   function JCS_Reference_Node (Structure: JSON_Constant_Structure;
                                 Position : JSON_Structure_Cursor)
-                               return JSON_Value_Constant_Reference
+                               return not null Node
    is begin
       if Position.Target = null then
          raise Constraint_Error with "Cursor does not designate a value.";
       elsif Position.Target.Parent /= Structure.Structure_Root then
          raise Constraint_Error with "Cursor is not from this structure.";
       else
-         return JSON_Value_Constant_Reference'(Ref => Position.Target);
+         return Position.Target;
       end if;
+   end JCS_Reference_Node;
+   
+   ----------------------------------------------------------------------
+   
+   function JCS_Constant_Reference (Structure: JSON_Constant_Structure;
+                                    Position : JSON_Structure_Cursor)
+                                   return JSON_Value_Constant_Reference
+   is ((Ref => JCS_Reference_Node (Structure, Position)));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Constant_Reference (Structure: JSON_Mutable_Structure;
+                                    Position : JSON_Structure_Cursor)
+                                   return JSON_Value_Constant_Reference
+   is (JSON_Constant_Structure'(Structure_Root => Structure.Structure_Root,
+                                Codec_Constant => Structure.Codec_Constant)
+           .JCS_Constant_Reference (Position));
+   
+   ----------------------------------------------------------------------
+   
+   function JMS_Reference (Structure: in out JSON_Mutable_Structure;
+                           Position : in     JSON_Structure_Cursor)
+                          return JSON_Value_Reference
+   is
+      Constant_Structure: JSON_Constant_Structure := 
+        (Structure_Root => Structure.Structure_Root,
+         Codec_Constant => Structure.Codec_Constant);
+      
+      Target: Node := JCS_Reference_Node (Structure => Constant_Structure,
+                                          Position  => Position);
+   begin
+      return (Ref => Target);
    end;
+   
    
    ---------------
    -- Iteration --
@@ -564,8 +631,14 @@ package body JSON.Unbounded_Codecs is
    
    ----------------------------------------------------------------------
    
-   function Iterate (Structure: JSON_Structure) return
-     JSON_Structure_Iterators.Reversible_Iterator'Class
+   function JCS_Iterate
+     (Structure: JSON_Constant_Structure)
+     return JSON_Structure_Iterators.Reversible_Iterator'Class
+   is (Structure_Iterator'(Structure_Root => Structure.Structure_Root));
+   
+   function JMS_Iterate
+     (Structure: JSON_Mutable_Structure)
+     return JSON_Structure_Iterators.Reversible_Iterator'Class
    is (Structure_Iterator'(Structure_Root => Structure.Structure_Root));
    
    ----------------------------------------------------------------------
@@ -674,27 +747,36 @@ package body JSON.Unbounded_Codecs is
    end Append_Null_Element;
    
    ----------------------------------------------------------------------
-   
+
    function Append_Structural_Member 
      (Structure: in out JSON_Mutable_Structure;
       Name     : in     JSON_String_Value;
       Kind     : in     JSON_Structure_Kind)
      return JSON_Value_Reference
-   is begin
-      return New_Struct: JSON_Value_Reference 
-        := Structure.Append_Null_Member (Name)
-      do
-         case Kind is
-            when JSON_Object =>
-               New_Struct.Container := (Kind => JSON_Object, others => <>);
-               Node_Hash_Maps.Setup (Map     => New_Struct.Container.Name_Map,
-                                     Subpool => New_Struct.Codec_Subpool);
-            when JSON_Array =>
-               New_Struct.Container := (Kind => JSON_Array, others => <>);
-               Node_Hash_Maps.Setup (Map     => New_Struct.Container.Index_Map,
-                                     Subpool => New_Struct.Codec_Subpool);
-         end case;
-      end return;
+   is 
+      New_Struct: JSON_Value_Reference 
+        := Structure.Append_Null_Member (Name);
+
+   begin
+      case Kind is
+         when JSON_Object =>
+            New_Struct.Container := (Kind => JSON_Object, others => <>);
+            Node_Hash_Maps.Setup (Map     => New_Struct.Container.Name_Map,
+                                  Subpool => New_Struct.Codec_Subpool);
+         when JSON_Array =>
+            New_Struct.Container := (Kind => JSON_Array, others => <>);
+            Node_Hash_Maps.Setup (Map     => New_Struct.Container.Index_Map,
+                                  Subpool => New_Struct.Codec_Subpool);
+      end case;
+
+      return (Ref => New_Struct.Ref.all'Unchecked_Access);
+      -- THIS IS SAFE BECAUSE: Ref points at a Node, which is always allocated
+      -- dynamically on a subpool owned by the codec. Since
+      -- JSON_Mutable_Structure is limited, and non-default disciminated
+      -- objects cannot be assigned except through initialization, it is not
+      -- possible for any JSON_Value_Reference returned here to end up as a
+      -- dangling reference. However since we are using an anonymous access
+      -- type, the compiler doesn't know that.
    end;
    
    ----------------------------------------------------------------------
@@ -703,21 +785,30 @@ package body JSON.Unbounded_Codecs is
      (Structure: in out JSON_Mutable_Structure;
       Kind     : in     JSON_Structure_Kind)
      return JSON_Value_Reference
-   is begin
-      return New_Struct: JSON_Value_Reference 
-          := Structure.Append_Null_Element
-      do
-         case Kind is
-            when JSON_Object =>
-               New_Struct.Container := (Kind => JSON_Object, others => <>);
-               Node_Hash_Maps.Setup (Map     => New_Struct.Container.Name_Map,
-                                     Subpool => New_Struct.Codec_Subpool);
-            when JSON_Array =>
-               New_Struct.Container := (Kind => JSON_Array, others => <>);
-               Node_Hash_Maps.Setup (Map     => New_Struct.Container.Index_Map,
-                                     Subpool => New_Struct.Codec_Subpool);
-         end case;
-      end return;
+   is
+      New_Struct: JSON_Value_Reference 
+        := Structure.Append_Null_Element;
+
+   begin
+      case Kind is
+         when JSON_Object =>
+            New_Struct.Container := (Kind => JSON_Object, others => <>);
+            Node_Hash_Maps.Setup (Map     => New_Struct.Container.Name_Map,
+                                  Subpool => New_Struct.Codec_Subpool);
+         when JSON_Array =>
+            New_Struct.Container := (Kind => JSON_Array, others => <>);
+            Node_Hash_Maps.Setup (Map     => New_Struct.Container.Index_Map,
+                                  Subpool => New_Struct.Codec_Subpool);
+      end case;
+      
+      return (Ref => New_Struct.Ref.all'Unchecked_Access);
+      -- THIS IS SAFE BECAUSE: Ref points at a Node, which is always allocated
+      -- dynamically on a subpool owned by the codec. Since
+      -- JSON_Mutable_Structure is limited, and non-default disciminated
+      -- objects cannot be assigned except through initialization, it is not
+      -- possible for any JSON_Value_Reference returned here to end up as a
+      -- dangling reference. However since we are using an anonymous access
+      -- type, the compiler doesn't know that.
    end;
    
    --
@@ -786,15 +877,30 @@ package body JSON.Unbounded_Codecs is
    function Root (Codec: aliased in out Unbounded_JSON_Codec)
                  return JSON_Mutable_Structure'Class
    is (JSON_Mutable_Structure'(Structure_Root => Codec.Root_Node,
-                               Codec_Constant => Codec'Access,
-                               Codec_Mutable  => Codec'Access));
+                               Codec_Constant => Codec'Unchecked_Access,
+                               Codec_Mutable  => Codec'Unchecked_Access));
+   
+   -- THIS IS SAFE BECAUSE: JSON_Mutable_Structure'Class is a limited type,
+   -- and so this function must be initializing a new declaration, which
+   -- ensures Codec exists for at least as long as the returned object.
+   --
+   -- If Unchecked_Deallocate is used on Codec, use of 'Access would not be
+   -- protective anyways.
 
    ----------------------------------------------------------------------
    
    function Constant_Root (Codec: aliased Unbounded_JSON_Codec)
-                           return JSON_Structure'Class
-   is (JSON_Structure'(Structure_Root => Codec.Root_Node,
-                       Codec_Constant => Codec'Access));
+                           return JSON_Constant_Structure'Class
+   is (JSON_Constant_Structure'(Structure_Root => Codec.Root_Node,
+                                Codec_Constant => Codec'Unchecked_Access));
+   
+   -- THIS IS SAFE BECAUSE: JSON_Constant_Structure'Class is a limited type,
+   -- and so this function must be initializing a new declaration, which
+   -- ensures Codec exists for at least as long as the returned object.
+   --
+   -- If Unchecked_Deallocate is used on Codec, use of 'Access would not be
+   -- protective anyways.
+   
    
    -----------
    -- Delve --
@@ -807,20 +913,34 @@ package body JSON.Unbounded_Codecs is
       return JSON_Mutable_Structure'
         (Structure_Root => Seek_Node (Codec => Codec,
                                       Value => Structure),
-         Codec_Constant => Codec'Access,
-         Codec_Mutable  => Codec'Access);
-   end;
+         Codec_Constant => Codec'Unchecked_Access,
+         Codec_Mutable  => Codec'Unchecked_Access);
+      
+      -- THIS IS SAFE BECAUSE: JSON_Mutable_Structure'Class is a limited type,
+      -- and so this function must be initializing a new declaration, which
+      -- ensures Codec exists for at least as long as the returned object.
+      --
+      -- If Unchecked_Deallocate is used on Codec, use of 'Access would not be
+      -- protective anyways.
+   end Delve;
    
    ----------------------------------------------------------------------
    
    function Constant_Delve (Codec    : aliased Unbounded_JSON_Codec;
                             Structure: aliased JSON_Value'Class)
-                           return JSON_Structure'Class
+                           return JSON_Constant_Structure'Class
    is begin
-      return JSON_Structure'
+      return JSON_Constant_Structure'
         (Structure_Root => Seek_Node (Codec => Codec,
                                       Value => Structure),
-         Codec_Constant => Codec'Access);
+         Codec_Constant => Codec'Unchecked_Access);
+      
+      -- THIS IS SAFE BECAUSE: JSON_Constant_Structure'Class is a limited type,
+      -- and so this function must be initializing a new declaration, which
+      -- ensures Codec exists for at least as long as the returned object.
+      --
+      -- If Unchecked_Deallocate is used on Codec, use of 'Access would not be
+      -- protective anyways.
    end Constant_Delve;
    
    -----------
@@ -1613,33 +1733,7 @@ package body JSON.Unbounded_Codecs is
    --------------
    
    procedure Finalize (Codec: in out Unbounded_JSON_Codec) is
---      use Ada.Text_IO;
---      use Node_Hash_Maps;
-      
---      Perf: constant Performance_Counters := Performance (Codec.Path_Map);
    begin
---      Put_Line ("Path hash table stats:");
---      Put_Line ("----------------------");
---      Put_Line ("Primary Registrations");
-      
---      for Level in Match_Level loop
---         Put      ("  Level" & Match_Level'Image(Level) & " =");
---         Put_Line (Natural'Image (Perf.Primary_Registrations(Level)));
---      end loop;
-      
---      New_Line;
---      Put_Line ("Overflow Registrations");
-      
---      for Level in Match_Level loop
---         Put      ("  Level" & Match_Level'Image(Level) & " =");
---         Put_Line (Natural'Image (Perf.Overflow_Registrations(Level)));
---      end loop;
-      
---      New_Line;
---      Put_Line ("Total Tables    =" & Natural'Image (Perf.Total_Tables));
---      Put_Line ("Saturation HW   =" & Natural'Image (Perf.Saturation_High_Water));
---      Put_Line ("Full Collisions =" & Natural'Image (Perf.Full_Collisions));
-      
       Ada.Unchecked_Deallocate_Subpool (Codec.Codec_Subpool);
       -- Everthing in one go!
    end Finalize;

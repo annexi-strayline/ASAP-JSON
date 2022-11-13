@@ -148,12 +148,34 @@ package body Node_Hash_Maps is
       Primary_Plan  :    out Indexing_Strategies.Indexing_Plan;
       Secondary_Plan:    out Indexing_Strategies.Indexing_Plan)
    is
-      Algo: Config.Hash_Algorithm renames Config.Unbounded_Codec_Hash_Algo;
+      Algo: Config.Hash_Algorithm := Config.Unbounded_Codec_Hash_Algo;
+      -- GNAT Bug work-around: We originally had this as a rename of
+      -- Config.Unbounded_Coded_Hash_Algo. The idea was that it would
+      -- allow the compiler to optimize the entire invocation of the
+      -- following case statement. However making Algo constant causes
+      -- GNAT (11.3.0) to flip-out entirely, causing all sorts of false-
+      -- positive errors even outside of this package.
+      --
+      -- Basically it seems GNAT 11.3.0 is smart enough to understand that
+      -- creating a discriminated object where the discriminent is set
+      -- via a library-level constant means that it can know some things
+      -- "for sure" about that object. But it isn't smart enough to know if
+      -- logic, such as the above switch statement has actually checked it or
+      -- not.
+      --
+      -- What should be happening is that GNAT should be using similar smarts
+      -- to recognize that entire branches of logic will never happen
+      -- (dead code elimination), and do that elimnation before it sees if that
+      -- code is going to raise an exception at run-time, or assumes that we
+      -- are "definately" accessing something that is not there
+      --
+      -- /rant
+      
       Engine: Hash_Engine_Container (Algo);
    begin
       -- Compute the Hash
       case Algo is
-         when xxHash32 => 
+         when xxHash32 =>
             Identifier'Write (Engine.XXH32'Access, ID);
             Hash.XXH32 := Modular_Hashing.xxHash32.XXH32_Hash 
               (Engine.XXH32.Digest);
